@@ -1,0 +1,22 @@
+snmp_network_monitor_project_spec (1).md
+
+# Python
+backend/__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+
+# Database
+*.sqlite3
+*.db
+backend/network_monitor.db
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+.DS_Store
