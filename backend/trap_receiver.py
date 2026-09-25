@@ -3,23 +3,25 @@ from pysnmp.hlapi.asyncio import *
 from pysnmp.entity import engine, config
 from pysnmp.carrier.asyncio.dgram import udp
 from pysnmp.entity.rfc3413 import ntfrcv
-import sqlite3
 import datetime
 import json
-
-# Database path
-DB_PATH = 'network_monitor.db'
+from database import SessionLocal
+import models
 
 def save_event(device_ip, event_type, if_index, raw_oid, details=""):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO events (timestamp, device_ip, event_type, if_index, raw_oid, details) VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.datetime.now(), device_ip, event_type, if_index, raw_oid, details)
+        db = SessionLocal()
+        event = models.Event(
+            timestamp=datetime.datetime.now(),
+            device_ip=device_ip,
+            event_type=event_type,
+            if_index=if_index,
+            raw_oid=raw_oid,
+            details=details
         )
-        conn.commit()
-        conn.close()
+        db.add(event)
+        db.commit()
+        db.close()
         print(f"[{datetime.datetime.now()}] Saved event: {event_type} from {device_ip} (ifIndex: {if_index})")
     except Exception as e:
         print(f"Failed to save event: {e}")
@@ -37,6 +39,7 @@ def cbFun(snmpEngine, stateReference, contextEngineId, contextName, varBinds, cb
     
     event_type = 'Unknown'
     if_index = None
+    if_name_trap = None
     raw_oid = ""
     
     varbinds_dict = {}
@@ -75,6 +78,17 @@ def cbFun(snmpEngine, stateReference, contextEngineId, contextName, varBinds, cb
             except:
                 pass
                 
+        # Fallback to extract if_index from ifAdminStatus or ifOperStatus OID
+        if not if_index and ('1.3.6.1.2.1.2.2.1.7.' in oid_str or '1.3.6.1.2.1.2.2.1.8.' in oid_str):
+            try:
+                if_index = int(oid_str.split('.')[-1])
+            except:
+                pass
+                
+        # Check for ifDescr or ifName
+        if '1.3.6.1.2.1.2.2.1.2.' in oid_str or '1.3.6.1.2.1.31.1.1.1.1.' in oid_str:
+            if_name_trap = val_str
+                
         # Extract specific short descriptions
         if '1.3.6.1.4.1.9.9.41.1.2.3.1.5' in oid_str: # clogHistMsgText
             short_detail = val_str
@@ -82,6 +96,7 @@ def cbFun(snmpEngine, stateReference, contextEngineId, contextName, varBinds, cb
     # Combine short detail and full JSON varbinds
     details_payload = json.dumps({
         "short_desc": short_detail,
+        "if_name": if_name_trap,
         "varbinds": varbinds_dict
     })
                 

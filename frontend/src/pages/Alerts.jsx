@@ -6,7 +6,7 @@ const API_BASE = 'http://localhost:8000';
 const Alerts = () => {
   const [alerts, setAlerts] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [filterDate, setFilterDate] = useState('');
+  const [filterDate, setFilterDate] = useState(new Date().toISOString().split('T')[0]);
 
   const fetchAlerts = async () => {
     try {
@@ -49,11 +49,12 @@ const Alerts = () => {
 
         if (!resolved) {
           const dev = devices.find(d => d.ip === downEv.device_ip);
+          const ifaceStr = downEv.if_name ? downEv.if_name : `Index ${downEv.if_index}`;
           activeAlerts.push({
             id: `ev-${downEv.id}`,
             severity: 'warning',
             title: `Interface Down on ${dev ? dev.name : downEv.device_ip}`,
-            message: `Interface Index ${downEv.if_index} reported LinkDown trap.`,
+            message: `Interface ${ifaceStr} reported LinkDown trap.`,
             time: downEv.time,
             icon: <AlertCircle size={20} className="text-warning" />
           });

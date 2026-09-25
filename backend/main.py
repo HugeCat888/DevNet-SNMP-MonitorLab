@@ -7,6 +7,8 @@ from database import engine, get_db
 import snmp_core
 import asyncio
 import datetime
+import json
+import trap_receiver
 from database import engine, get_db, SessionLocal
 
 models.Base.metadata.create_all(bind=engine)
@@ -70,9 +72,16 @@ async def background_traffic_poller():
 
 app = FastAPI(title="SNMP Network Monitor API")
 
+async def start_trap_receiver():
+    try:
+        await trap_receiver.run_trap_receiver()
+    except Exception as e:
+        print(f"Trap receiver failed to start: {e}")
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(background_traffic_poller())
+    asyncio.create_task(start_trap_receiver())
 
 app.add_middleware(
     CORSMiddleware,
@@ -110,6 +119,20 @@ def read_device(device_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Device not found")
     return device
 
+@app.put("/devices/{device_id}", response_model=schemas.Device)
+def update_device(device_id: int, device_update: schemas.DeviceUpdate, db: Session = Depends(get_db)):
+    db_device = db.query(models.Device).filter(models.Device.id == device_id).first()
+    if not db_device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    update_data = device_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_device, key, value)
+        
+    db.commit()
+    db.refresh(db_device)
+    return db_device
+
 @app.delete("/devices/{device_id}")
 def delete_device(device_id: int, db: Session = Depends(get_db)):
     device = db.query(models.Device).filter(models.Device.id == device_id).first()
@@ -133,6 +156,7 @@ async def check_device(device_id: int, db: Session = Depends(get_db)):
     
     result = await snmp_core.get_sys_info(device.ip, device.community_read)
     
+    discovery_count = 0
     if "error" in result:
         device.snmp_status = "FAIL"
         device.status = "OFFLINE"
@@ -143,9 +167,24 @@ async def check_device(device_id: int, db: Session = Depends(get_db)):
         device.sys_object_id = result.get("sysObjectID")
         device.sys_object_id_resolved = result.get("sysObjectIDResolved")
         device.sys_descr = result.get("sysDescr")
+        device.sys_name = result.get("sysName")
+        
+        # Detect CLI protocol
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(device.ip, 22), timeout=1.0)
+            writer.close()
+            await writer.wait_closed()
+            device.cli_protocol = "SSH"
+        except:
+            try:
+                _, writer = await asyncio.wait_for(asyncio.open_connection(device.ip, 23), timeout=1.0)
+                writer.close()
+                await writer.wait_closed()
+                device.cli_protocol = "Telnet"
+            except:
+                device.cli_protocol = "Unknown"
         
         # Auto-discover interfaces
-        discovery_count = 0
         try:
             discovered_interfaces = await snmp_core.walk_interfaces(device.ip, device.community_read)
             discovered_indexes = set()
@@ -169,6 +208,7 @@ async def check_device(device_id: int, db: Session = Depends(get_db)):
                     existing_iface.admin_status = iface_data.get('admin_status', existing_iface.admin_status)
                     existing_iface.oper_status = iface_data.get('oper_status', existing_iface.oper_status)
                     existing_iface.type = iface_data.get('type', existing_iface.type)
+                    existing_iface.ip_address = iface_data.get('ip_address', existing_iface.ip_address)
                 else:
                     # Create new interface — only pass fields that exist in the model
                     new_iface = models.Interface(
@@ -181,6 +221,7 @@ async def check_device(device_id: int, db: Session = Depends(get_db)):
                         admin_status=iface_data.get('admin_status', 'unknown'),
                         oper_status=iface_data.get('oper_status', 'unknown'),
                         type=iface_data.get('type', 'other'),
+                        ip_address=iface_data.get('ip_address', None)
                     )
                     db.add(new_iface)
                     discovery_count += 1
@@ -394,8 +435,25 @@ async def get_topology(db: Session = Depends(get_db)):
                 
                 # Find remote device in DB
                 target_dev = None
+                remote_ip = neighbor.get('remote_ip')
+                
                 for t in devices:
-                    if t.id != dev.id and t.name.lower() == remote_name:
+                    if t.id == dev.id:
+                        continue
+                        
+                    # 1st Priority: Match by IP address (most accurate)
+                    if remote_ip and t.ip == remote_ip:
+                        target_dev = t
+                        break
+                        
+                    # 2nd Priority: Match by sys_name (exact hostname)
+                    t_sys = t.sys_name.lower().split('.')[0] if t.sys_name else None
+                    if t_sys and t_sys == remote_name:
+                        target_dev = t
+                        break
+                        
+                    # 3rd Priority: Match by user-defined name
+                    if t.name.lower() == remote_name:
                         target_dev = t
                         break
                         
@@ -441,15 +499,44 @@ def get_events(date: str = None, limit: int = 100, db: Session = Depends(get_db)
 
     events = query.order_by(models.Event.timestamp.desc()).limit(limit).all()
     
+    # Map interfaces for naming
+    devices = db.query(models.Device).all()
+    ip_to_dev_id = {d.ip: d.id for d in devices}
+    interfaces = db.query(models.Interface).all()
+    iface_map = {(i.device_id, i.if_index): i.name for i in interfaces}
+    
     # Format the timestamp for the frontend
     result = []
     for ev in events:
+        dev_id = ip_to_dev_id.get(ev.device_ip)
+        if_name = iface_map.get((dev_id, ev.if_index)) if dev_id else None
+        
+        # Fallback to trap details if we couldn't resolve it from DB
+        if not if_name and ev.details:
+            try:
+                details_dict = json.loads(ev.details)
+                if_name = details_dict.get("if_name")
+                
+                # Check varbinds for old traps
+                if not if_name and "varbinds" in details_dict:
+                    varbinds = details_dict["varbinds"]
+                    for oid, val in varbinds.items():
+                        if '1.3.6.1.2.1.2.2.1.2.' in oid or '1.3.6.1.2.1.31.1.1.1.1.' in oid:
+                            if_name = val
+                            break
+                            
+                if not if_name:
+                    if_name = None
+            except:
+                pass
+                
         result.append({
             "id": ev.id,
             "time": ev.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             "device_ip": ev.device_ip,
             "event_type": ev.event_type,
             "if_index": ev.if_index,
+            "if_name": if_name,
             "raw_oid": ev.raw_oid,
             "details": ev.details
         })

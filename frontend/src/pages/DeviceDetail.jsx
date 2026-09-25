@@ -118,7 +118,12 @@ const DeviceDetail = () => {
         <Link to="/devices" className="btn btn-ghost btn-circle">
           <ArrowLeft size={20} />
         </Link>
-        <h2 className="text-2xl font-bold">Device Details: {device?.name || `ID ${id}`}</h2>
+        <div>
+          <h2 className="text-2xl font-bold">Device Details: {device?.name || `ID ${id}`}</h2>
+          {device?.sys_name && (
+            <p className="text-sm text-base-content/70 mt-1">Hostname: <span className="font-semibold">{device.sys_name}</span></p>
+          )}
+        </div>
       </div>
 
       {/* System Information */}
@@ -190,6 +195,7 @@ const DeviceDetail = () => {
                 <div>
                   <h3 className="text-xl font-bold">{selectedInterface.name}</h3>
                   <p className="text-sm text-base-content/70">{selectedInterface.description}</p>
+                  <p className="text-sm text-base-content/70">IP Address: {selectedInterface.ip_address || 'Unassigned'}</p>
                   <p className="text-sm text-base-content/70">MAC: {selectedInterface.mac_address || 'N/A'}</p>
                   <p className="text-sm text-base-content/70">Speed: {selectedInterface.speed_bps ? (selectedInterface.speed_bps / 1000000).toFixed(0) : '?'} Mbps</p>
                 </div>

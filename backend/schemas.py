@@ -13,9 +13,22 @@ class DeviceBase(BaseModel):
     v3_auth_pass: Optional[str] = None
     v3_priv_proto: Optional[str] = None
     v3_priv_pass: Optional[str] = None
+    cli_username: Optional[str] = None
+    cli_password: Optional[str] = None
+    cli_protocol: Optional[str] = None
 
 class DeviceCreate(DeviceBase):
     pass
+
+class DeviceUpdate(BaseModel):
+    name: Optional[str] = None
+    ip: Optional[str] = None
+    snmp_version: Optional[str] = None
+    community_read: Optional[str] = None
+    community_write: Optional[str] = None
+    cli_username: Optional[str] = None
+    cli_password: Optional[str] = None
+    cli_protocol: Optional[str] = None
 
 class Device(DeviceBase):
     id: int
@@ -25,6 +38,7 @@ class Device(DeviceBase):
     sys_object_id: Optional[str] = None
     sys_object_id_resolved: Optional[str] = None
     sys_descr: Optional[str] = None
+    sys_name: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,6 +51,7 @@ class InterfaceBase(BaseModel):
     oper_status: str
     speed_bps: Optional[int] = None
     mac_address: Optional[str] = None
+    ip_address: Optional[str] = None
 
 class Interface(InterfaceBase):
     id: int

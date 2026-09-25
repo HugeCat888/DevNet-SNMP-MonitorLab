@@ -24,8 +24,14 @@ class Device(Base):
     snmp_status = Column(String, default="UNKNOWN")
     uptime = Column(String, nullable=True)
     sys_object_id = Column(String, nullable=True)
+    
+    # CLI fields
+    cli_username = Column(String, nullable=True)
+    cli_password = Column(String, nullable=True)
+    cli_protocol = Column(String, nullable=True)
     sys_object_id_resolved = Column(String, nullable=True)
     sys_descr = Column(String, nullable=True)
+    sys_name = Column(String, nullable=True)
 
     interfaces = relationship("Interface", back_populates="device")
 
@@ -41,6 +47,7 @@ class Interface(Base):
     oper_status = Column(String)
     speed_bps = Column(Integer, nullable=True)
     mac_address = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
 
     device = relationship("Device", back_populates="interfaces")
     traffic = relationship("TrafficSample", back_populates="interface")

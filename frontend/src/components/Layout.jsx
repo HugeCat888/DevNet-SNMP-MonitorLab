@@ -42,16 +42,7 @@ const Layout = () => {
             {/* Can display current route name here if needed */}
           </div>
           <div className="flex items-center gap-4">
-            <div className="dropdown dropdown-end">
-              <div tabIndex={0} role="button" className="btn btn-ghost">
-                Admin
-                <svg width="12px" height="12px" className="h-2 w-2 fill-current opacity-60 inline-block" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 2048"><path d="M1799 349l242 241-1017 1017L0 590l242-241 775 775 782-775z"></path></svg>
-              </div>
-              <ul tabIndex={0} className="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52">
-                <li><a>Profile</a></li>
-                <li><a className="text-error">Logout</a></li>
-              </ul>
-            </div>
+            {/* Admin dropdown removed */}
           </div>
         </header>
 

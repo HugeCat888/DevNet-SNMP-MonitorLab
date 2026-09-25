@@ -52,7 +52,8 @@ async def get_sys_info(ip, community="public"):
         ContextData(),
         ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0')),
         ObjectType(ObjectIdentity('1.3.6.1.2.1.1.2.0')),
-        ObjectType(ObjectIdentity('1.3.6.1.2.1.1.3.0'))
+        ObjectType(ObjectIdentity('1.3.6.1.2.1.1.3.0')),
+        ObjectType(ObjectIdentity('1.3.6.1.2.1.1.5.0'))
     )
     
     if errorIndication:
@@ -65,7 +66,8 @@ async def get_sys_info(ip, community="public"):
             "sysDescr": str(varBinds[0][1]),
             "sysObjectID": raw_oid,
             "sysObjectIDResolved": resolve_sys_object_id(raw_oid),
-            "sysUpTime": str(varBinds[2][1])
+            "sysUpTime": str(varBinds[2][1]),
+            "sysName": str(varBinds[3][1]) if len(varBinds) > 3 else None
         }
 
 async def set_interface_admin_status(ip, community, if_index, status):
@@ -169,6 +171,45 @@ async def walk_interfaces(ip, community='public'):
                             interfaces[idx]['oper_status'] = {1: 'up', 2: 'down', 3: 'testing', 4: 'unknown', 5: 'dormant', 6: 'notPresent', 7: 'lowerLayerDown'}.get(status_val, 'unknown')
                         except (ValueError, TypeError):
                             interfaces[idx]['oper_status'] = 'unknown'
+                            
+        # Now get IP addresses
+        iterator_ip = walk_cmd(
+            snmp_engine,
+            CommunityData(community),
+            transport,
+            ContextData(),
+            ObjectType(ObjectIdentity('1.3.6.1.2.1.4.20.1')),
+            lexicographicMode=False
+        )
+        ip_table = {}
+        async for errInd, errStat, errIdx, vBinds in iterator_ip:
+            if errInd or errStat: break
+            for vBind in vBinds:
+                oid_tuple = vBind[0].asTuple()
+                if len(oid_tuple) >= 14:
+                    col = oid_tuple[9]
+                    ip = '.'.join(map(str, oid_tuple[10:14]))
+                    val = vBind[1]
+                    if ip not in ip_table: ip_table[ip] = {'if_index': None, 'netmask': None}
+                    
+                    if col == 2: # ipAdEntIfIndex
+                        try: ip_table[ip]['if_index'] = int(val)
+                        except: pass
+                    elif col == 3: # ipAdEntNetMask
+                        ip_table[ip]['netmask'] = str(val)
+        
+        # Map IP to interfaces
+        for ip, data in ip_table.items():
+            idx = data['if_index']
+            mask = data['netmask']
+            if idx and idx in interfaces:
+                cidr = 0
+                if mask:
+                    try:
+                        cidr = sum([bin(int(x)).count("1") for x in mask.split(".")])
+                    except: pass
+                interfaces[idx]['ip_address'] = f"{ip}/{cidr}" if cidr > 0 else ip
+
         return list(interfaces.values())
     except Exception as e:
         print('Walk error:', e)
@@ -246,6 +287,29 @@ async def get_cdp_neighbors(ip, community='public'):
                     if if_index in neighbors and device_index in neighbors[if_index]:
                         neighbors[if_index][device_index]['remote_port'] = port_id
                         
+        # cdpCacheAddress (1.3.6.1.4.1.9.9.23.1.2.1.1.4)
+        iterator_addr = walk_cmd(
+            snmp_engine, CommunityData(community), transport, ContextData(),
+            ObjectType(ObjectIdentity('1.3.6.1.4.1.9.9.23.1.2.1.1.4')), lexicographicMode=False
+        )
+        async for errorIndication, errorStatus, errorIndex, varBinds in iterator_addr:
+            if errorIndication or errorStatus: break
+            for varBind in varBinds:
+                oid_tuple = varBind[0].asTuple()
+                if len(oid_tuple) >= 16:
+                    if_index = oid_tuple[14]
+                    device_index = oid_tuple[15]
+                    
+                    # cdpCacheAddress is a NetworkAddress (HexString). E.g. 0xC0A80101 for 192.168.1.1
+                    try:
+                        val_hex = varBind[1].asNumbers()
+                        if len(val_hex) == 4:
+                            ip_str = ".".join(str(x) for x in val_hex)
+                            if if_index in neighbors and device_index in neighbors[if_index]:
+                                neighbors[if_index][device_index]['remote_ip'] = ip_str
+                    except:
+                        pass
+                        
         # Flatten dictionary to list
         result = []
         for if_idx, devs in neighbors.items():
@@ -253,7 +317,8 @@ async def get_cdp_neighbors(ip, community='public'):
                 result.append({
                     'local_if_index': if_idx,
                     'remote_device': data['remote_device'],
-                    'remote_port': data['remote_port']
+                    'remote_port': data.get('remote_port', ''),
+                    'remote_ip': data.get('remote_ip', '')
                 })
         return result
     except Exception as e:

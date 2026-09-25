@@ -29,8 +29,8 @@
 - **อ่านข้อมูล CDP ผ่าน SNMP**: อาศัยเทคนิคการกวาด OID ของ `cdpCacheDeviceId` และ `cdpCacheDevicePort` ทำให้ระบบรู้ว่าสายเชื่อมอยู่จากพอร์ตใดไปหาเร้าเตอร์ตัวใด
 
 ### 5. 🚨 SNMP Traps & Smart Alerts
-- **Trap Receiver พื้นหลัง**: มีสคริปต์ `trap_receiver.py` ทำงานแยกเป็น Service รับฟัง SNMP Trap (UDP Port 162) ไว้ตลอดเวลา
-- **Events Log**: บันทึก Trap อัตโนมัติลงในหน้า Events เช่น `LinkUp`, `LinkDown`, `ColdStart` พร้อม Live Polling หน้าเว็บให้เห็นเหตุการณ์ใหม่ทันที
+- **Integrated Trap Receiver**: ระบบ `trap_receiver.py` ทำงานร่วมกับ FastAPI ใน Background Task อัตโนมัติ (ไม่ต้องรันแยก) เพื่อรอรับ SNMP Trap (UDP Port 162) ไว้ตลอดเวลา โดยผูกกับ SQLAlchemy ทำให้ไม่มีปัญหา Database Lock
+- **Events Log & Interface Resolution**: บันทึก Trap อัตโนมัติ เช่น `LinkUp`, `LinkDown` ลงในฐานข้อมูล พร้อมความสามารถในการดึง **"ชื่อ Interface" (เช่น FastEthernet0/1)** จากข้อมูลเชิงลึก (VarBinds) ขึ้นมาโชว์ในหน้าเว็บแทนที่จะแสดงแค่ Index ตัวเลข
 - **Smart Active Alerts**: ระบบแจ้งเตือนจะวิเคราะห์ข้อมูลเอง หากเร้าเตอร์ OFFLINE จะแจ้งเตือนระดับ Critical และถ้าพอร์ตเกิด LinkDown แจ้งเตือนระดับ Warning จะโผล่ขึ้น และ **แจ้งเตือนจะหายไปอัตโนมัติหากมี Trap LinkUp กลับมา**
 
 ### 6. 📜 เหตุการณ์และประวัติ (Events & SNMP Traps Log)
@@ -40,8 +40,8 @@
 - **Event Type**: ระบบจะทำการแกะข้อมูล (Parse) จากตัวเลขอ่านยากๆ ออกมาเป็นคำที่เข้าใจง่าย เช่น:
   - `LinkUp` 🟢 (พอร์ตเชื่อมต่อสำเร็จ)
   - `LinkDown` 🔴 (พอร์ตสายหลุดหรือโดนปิด)
-  - `ColdStart` / `WarmStart` 🔄 (เครื่องถูกเปิดใหม่หรือรีบูต)
-- **Interface Index**: หากเหตุการณ์นั้นเกี่ยวกับพอร์ต (เช่นพอร์ตดับ) ระบบจะบอกตัวเลข Index ของพอร์ตนั้นๆ ได้อย่างแม่นยำ
+- **ColdStart / WarmStart** 🔄 (เครื่องถูกเปิดใหม่หรือรีบูต)
+- **Interface Name / Index**: หากเหตุการณ์นั้นเกี่ยวกับพอร์ต ระบบสามารถวิเคราะห์ข้อมูลแบบละเอียด (VarBinds) เพื่อดึงชื่อพอร์ต (เช่น `FastEthernet0/1`) มาแสดงผลได้อย่างแม่นยำ (แทนที่จะแสดงเพียงแค่ Index ตัวเลข)
 - **Raw Trap OID**: แสดงรหัส OID ดั้งเดิมที่ส่งมากับ Trap เพื่อให้ Network Admin สามารถนำไปตรวจสอบเพิ่มเติมหรืออ้างอิงในเอกสาร MIB ได้
 - *หน้าเพจนี้ทำงานด้วยระบบ **Live Polling** ซึ่งจะดึงข้อมูลใหม่ๆ มาแสดงผลแบบอัตโนมัติทุกๆ 5 วินาที ทำให้คุณไม่ต้องกด Refresh หน้าจอเองเพื่อรอดูเหตุการณ์ใหม่เลย*
 
@@ -66,7 +66,7 @@ Router(config)# snmp-server user admin MyGroup v3 auth sha MyAuthPass priv aes 1
 ### การตั้งค่าให้เร้าเตอร์ส่ง SNMP TRAP (เวลาพอร์ตดับ/ติด) กลับมาระบบ
 เปิดฟีเจอร์ Trap เพื่อให้เร้าเตอร์วิ่งมารายงานตัวกับระบบ (IP 192.168.x.x คือ IP ของเครื่องเราที่รันโปรแกรม)
 ```text
-Router(config)# snmp-server host 192.168.215.1 version 2c public
+Router(config)# snmp-server host [IP_ADDRESS] version 2c public
 Router(config)# snmp-server enable traps snmp linkdown linkup coldstart warmstart
 ```
 
@@ -83,13 +83,10 @@ Router(config)# cdp run
 ### 1. การรัน Backend (FastAPI & Trap Receiver)
 เปิด Terminal ที่โฟลเดอร์ `backend`
 ```bash
-# 1. รัน API Server
+# รัน API Server (Trap Receiver และ Traffic Poller จะถูกรันทำงานเป็น Background Task อัตโนมัติ)
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-# 2. เปิด Terminal อีกแท็บรัน Trap Receiver ควบคู่กัน (สำคัญมาก! สำหรับรับ Event LinkDown/Up)
-python trap_receiver.py
 ```
-*(ถ้ารัน Trap Receiver แล้วขึ้น Permission Error แสดงว่า Port 162 อาจโดนโปรแกรมอื่นใช้ ให้ลองรันในฐานะ Administrator หรือสลับพอร์ต)*
+*(ถ้าเกิด Permission Error หรือ Address already in use แสดงว่า Port 162 อาจโดนโปรแกรมอื่นใช้ หรือคุณอาจต้องรัน Command Prompt / Terminal ในฐานะ Administrator)*
 
 ### 2. การรัน Frontend (React)
 เปิด Terminal ที่โฟลเดอร์ `frontend`
