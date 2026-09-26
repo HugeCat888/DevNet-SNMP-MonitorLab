@@ -20,6 +20,12 @@ class DeviceBase(BaseModel):
 class DeviceCreate(DeviceBase):
     pass
 
+class DiscoverSubnetRequest(BaseModel):
+    subnet: str
+    community_read: str = "public"
+    community_write: str = "private"
+    snmp_version: str = "v2c"
+
 class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     ip: Optional[str] = None

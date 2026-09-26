@@ -4,6 +4,11 @@ import { Search, Plus, Activity, AlertCircle, RefreshCw } from 'lucide-react';
 
 const Devices = () => {
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showDiscoverModal, setShowDiscoverModal] = useState(false);
+  const [discoverTab, setDiscoverTab] = useState('subnet');
+  const [discoverSubnet, setDiscoverSubnet] = useState('192.168.215.0/24');
+  const [discoverCommunity, setDiscoverCommunity] = useState('public');
+  const [isDiscovering, setIsDiscovering] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
   const [editingDeviceId, setEditingDeviceId] = useState(null);
   const [snmpVersion, setSnmpVersion] = useState('v2c');
@@ -49,6 +54,38 @@ const Devices = () => {
   useEffect(() => {
     fetchDevices();
   }, []);
+
+  const handleDiscover = async () => {
+    setIsDiscovering(true);
+    try {
+      const url = discoverTab === 'subnet' ? 'http://localhost:8000/devices/discover/subnet' : 'http://localhost:8000/devices/discover/cdp';
+      const payload = discoverTab === 'subnet' ? {
+        subnet: discoverSubnet,
+        community_read: discoverCommunity,
+        community_write: 'private',
+        snmp_version: 'v2c'
+      } : {};
+      
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: discoverTab === 'subnet' ? JSON.stringify(payload) : undefined
+      });
+      
+      const data = await res.json();
+      if (res.ok) {
+        showNotification('success', data.message);
+        setShowDiscoverModal(false);
+        fetchDevices();
+      } else {
+        showNotification('error', `Discovery failed: ${data.detail || data.message || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error(err);
+      showNotification('error', "Error during discovery");
+    }
+    setIsDiscovering(false);
+  };
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -151,15 +188,20 @@ const Devices = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold">Devices</h2>
-        <button className="btn btn-primary" onClick={() => {
-          setIsEditMode(false);
-          setEditingDeviceId(null);
-          setFormData({ name: '', ip: '', community_read: 'public', community_write: 'private', cli_username: '', cli_password: '' });
-          setSnmpVersion('v2c');
-          setShowAddModal(true);
-        }}>
-          <Plus size={18} /> Add Device
-        </button>
+        <div className="flex gap-2">
+          <button className="btn btn-secondary" onClick={() => setShowDiscoverModal(true)}>
+            <Search size={18} /> Discovery
+          </button>
+          <button className="btn btn-primary" onClick={() => {
+            setIsEditMode(false);
+            setEditingDeviceId(null);
+            setFormData({ name: '', ip: '', community_read: 'public', community_write: 'private', cli_username: '', cli_password: '' });
+            setSnmpVersion('v2c');
+            setShowAddModal(true);
+          }}>
+            <Plus size={18} /> Add Device
+          </button>
+        </div>
       </div>
       
       {/* Search & Filter */}
@@ -343,6 +385,48 @@ const Devices = () => {
             <div className="modal-action">
               <button className="btn" onClick={() => setDeleteConfirm({ show: false, id: null, name: '' })}>Cancel</button>
               <button className="btn btn-error" onClick={executeDeleteDevice}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Discovery Modal */}
+      {showDiscoverModal && (
+        <div className="modal modal-open">
+          <div className="modal-box w-11/12 max-w-xl">
+            <h3 className="font-bold text-lg mb-4">Discover Network Devices</h3>
+            
+            <div className="tabs tabs-boxed mb-4">
+              <button className={`tab ${discoverTab === 'subnet' ? 'tab-active' : ''}`} onClick={() => setDiscoverTab('subnet')}>IP Subnet</button>
+              <button className={`tab ${discoverTab === 'cdp' ? 'tab-active' : ''}`} onClick={() => setDiscoverTab('cdp')}>CDP Neighbors</button>
+            </div>
+            
+            {discoverTab === 'subnet' ? (
+              <div className="space-y-4">
+                <div className="form-control">
+                  <label className="label"><span className="label-text">IP Subnet (CIDR)</span></label>
+                  <input type="text" value={discoverSubnet} onChange={e => setDiscoverSubnet(e.target.value)} placeholder="192.168.1.0/24" className="input input-bordered" />
+                  <label className="label"><span className="label-text-alt text-base-content/60">Scanning may take a few seconds depending on subnet size. Max /23</span></label>
+                </div>
+                <div className="form-control">
+                  <label className="label"><span className="label-text">Community String</span></label>
+                  <input type="text" value={discoverCommunity} onChange={e => setDiscoverCommunity(e.target.value)} className="input input-bordered" />
+                </div>
+              </div>
+            ) : (
+              <div className="py-4">
+                <p className="text-base-content/80">
+                  This will scan all currently ONLINE devices in the system to discover their neighbors via CDP (Cisco Discovery Protocol). 
+                  Any newly discovered IPs will be probed via SNMP and added automatically.
+                </p>
+              </div>
+            )}
+            
+            <div className="modal-action">
+              <button className="btn" onClick={() => setShowDiscoverModal(false)} disabled={isDiscovering}>Cancel</button>
+              <button className="btn btn-secondary" onClick={handleDiscover} disabled={isDiscovering}>
+                {isDiscovering ? <span className="loading loading-spinner"></span> : 'Start Discovery'}
+              </button>
             </div>
           </div>
         </div>

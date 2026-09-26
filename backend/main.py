@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, WebSocket
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import models
@@ -10,6 +10,7 @@ import datetime
 import json
 import trap_receiver
 from database import engine, get_db, SessionLocal
+import ipaddress
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -148,12 +149,151 @@ def delete_device(device_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Device deleted successfully"}
 
-@app.post("/devices/{device_id}/check")
-async def check_device(device_id: int, db: Session = Depends(get_db)):
+async def background_discover_subnet(subnet: str, community_read: str, community_write: str, snmp_version: str):
+    db = SessionLocal()
+    try:
+        network = ipaddress.IPv4Network(subnet, strict=False)
+        hosts = list(network.hosts())
+        if len(hosts) > 512:
+            return
+            
+        existing_ips = {d.ip for d in db.query(models.Device).all()}
+        ips_to_scan = [str(ip) for ip in hosts if str(ip) not in existing_ips]
+        
+        tasks = [snmp_core.get_sys_info(ip, community_read) for ip in ips_to_scan]
+        
+        results = []
+        chunk_size = 10
+        for i in range(0, len(tasks), chunk_size):
+            chunk = tasks[i:i+chunk_size]
+            chunk_results = await asyncio.gather(*chunk, return_exceptions=True)
+            results.extend(chunk_results)
+            await asyncio.sleep(0.1) # Allow socket cleanup
+            
+        added_devices = []
+        for ip, res in zip(ips_to_scan, results):
+            if isinstance(res, dict) and "error" not in res and res.get("sysDescr"):
+                hostname = res.get("sysName") or f"Discovered-{ip}"
+                new_dev = models.Device(
+                    name=hostname,
+                    ip=ip,
+                    snmp_version=snmp_version,
+                    community_read=community_read,
+                    community_write=community_write,
+                    status="ONLINE",
+                    snmp_status="OK",
+                    uptime=res.get("sysUpTime"),
+                    sys_object_id=res.get("sysObjectID"),
+                    sys_object_id_resolved=res.get("sysObjectIDResolved"),
+                    sys_descr=res.get("sysDescr"),
+                    sys_name=res.get("sysName")
+                )
+                db.add(new_dev)
+                db.commit()
+                db.refresh(new_dev)
+                added_devices.append(new_dev)
+                
+        for dev in added_devices:
+            try:
+                await check_device_internal(dev.id, db)
+            except Exception as e:
+                print(f"Error checking newly discovered device {dev.ip}: {e}")
+    except Exception as e:
+        print(f"Subnet discovery error: {e}")
+    finally:
+        db.close()
+
+@app.post("/devices/discover/subnet")
+async def discover_subnet(req: schemas.DiscoverSubnetRequest, background_tasks: BackgroundTasks):
+    try:
+        network = ipaddress.IPv4Network(req.subnet, strict=False)
+        hosts = list(network.hosts())
+        if len(hosts) > 512:
+            raise HTTPException(status_code=400, detail="Subnet too large. Maximum /23 allowed.")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid subnet format (e.g. 192.168.1.0/24)")
+        
+    background_tasks.add_task(background_discover_subnet, req.subnet, req.community_read, req.community_write, req.snmp_version)
+    return {"message": "Subnet discovery started in the background. Check back in a few minutes."}
+
+async def background_discover_cdp():
+    db = SessionLocal()
+    try:
+        online_devices = db.query(models.Device).filter(models.Device.status == "ONLINE").all()
+        if not online_devices:
+            return
+            
+        existing_ips = {d.ip for d in db.query(models.Device).all()}
+        tasks = [snmp_core.get_cdp_neighbors(dev.ip, dev.community_read) for dev in online_devices]
+        cdp_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        discovered_ips = set()
+        for res in cdp_results:
+            if isinstance(res, list):
+                for neighbor in res:
+                    remote_ip = neighbor.get("remote_ip")
+                    if remote_ip and remote_ip not in existing_ips:
+                        discovered_ips.add(remote_ip)
+                        
+        if not discovered_ips:
+            return
+            
+        default_read = online_devices[0].community_read
+        default_write = online_devices[0].community_write
+
+        probe_tasks = [snmp_core.get_sys_info(ip, default_read) for ip in discovered_ips]
+        probe_results = []
+        chunk_size = 10
+        for i in range(0, len(probe_tasks), chunk_size):
+            chunk = probe_tasks[i:i+chunk_size]
+            chunk_results = await asyncio.gather(*chunk, return_exceptions=True)
+            probe_results.extend(chunk_results)
+            await asyncio.sleep(0.1)
+        
+        added_devices = []
+        for ip, res in zip(discovered_ips, probe_results):
+            if isinstance(res, dict) and "error" not in res and res.get("sysDescr"):
+                hostname = res.get("sysName") or f"CDP-Discovered-{ip}"
+                new_dev = models.Device(
+                    name=hostname,
+                    ip=ip,
+                    snmp_version="v2c",
+                    community_read=default_read,
+                    community_write=default_write,
+                    status="ONLINE",
+                    snmp_status="OK",
+                    uptime=res.get("sysUpTime"),
+                    sys_object_id=res.get("sysObjectID"),
+                    sys_object_id_resolved=res.get("sysObjectIDResolved"),
+                    sys_descr=res.get("sysDescr"),
+                    sys_name=res.get("sysName")
+                )
+                db.add(new_dev)
+                db.commit()
+                db.refresh(new_dev)
+                added_devices.append(new_dev)
+                existing_ips.add(ip)
+                
+        for dev in added_devices:
+            try:
+                await check_device_internal(dev.id, db)
+            except Exception as e:
+                print(f"Error checking newly discovered device {dev.ip}: {e}")
+    except Exception as e:
+        print(f"CDP discovery error: {e}")
+    finally:
+        db.close()
+
+@app.post("/devices/discover/cdp")
+async def discover_cdp(background_tasks: BackgroundTasks):
+    background_tasks.add_task(background_discover_cdp)
+    return {"message": "CDP discovery started in the background. Check back shortly."}
+
+async def check_device_internal(device_id: int, db: Session):
     device = db.query(models.Device).filter(models.Device.id == device_id).first()
     if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
-    
+        return {"error": "Device not found"}
+        
     result = await snmp_core.get_sys_info(device.ip, device.community_read)
     
     discovery_count = 0
@@ -255,6 +395,13 @@ async def check_device(device_id: int, db: Session = Depends(get_db)):
         "new_interfaces_discovered": discovery_count
     }
 
+@app.post("/devices/{device_id}/check")
+async def check_device(device_id: int, db: Session = Depends(get_db)):
+    result = await check_device_internal(device_id, db)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
 @app.get("/interfaces/{device_id}", response_model=list[schemas.Interface])
 def read_interfaces(device_id: int, db: Session = Depends(get_db)):
     device = db.query(models.Device).filter(models.Device.id == device_id).first()
@@ -275,7 +422,7 @@ async def set_admin_status(device_id: int, if_index: int, status: str, db: Sessi
 
     result = await snmp_core.set_interface_admin_status(device.ip, device.community_write, if_index, status)
     if "error" in result:
-         raise HTTPException(status_code=500, detail=result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
     
     # Update local DB
     interface = db.query(models.Interface).filter(models.Interface.device_id == device_id, models.Interface.if_index == if_index).first()
